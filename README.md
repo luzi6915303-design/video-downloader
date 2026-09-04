@@ -4,6 +4,8 @@
 
 内置 yt-dlp（Python 3.12 运行时 + ffmpeg），不依赖任何第三方解析服务器。
 
+**下载安装包 → [Releases](../../releases/latest)**（Android 8.0+ / arm64）
+
 ## 支持的网站
 
 | 网站 | 是否需要登录 |
