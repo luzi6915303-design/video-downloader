@@ -1,0 +1,12 @@
+local.properties
+keystore.properties
+*.jks
+.gradle/
+.kotlin/
+build/
+app/build/
+.idea/
+.DS_Store
+
+# Release APKs live on GitHub Releases, not in git history.
+dist/
