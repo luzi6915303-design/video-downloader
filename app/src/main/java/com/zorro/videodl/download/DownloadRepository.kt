@@ -2,6 +2,7 @@ package com.zorro.videodl.download
 
 import android.content.Context
 import android.util.Log
+import com.zorro.videodl.BuildConfig
 import com.zorro.videodl.core.DownloadSpec
 import com.zorro.videodl.core.DownloadTask
 import com.zorro.videodl.core.Quality
@@ -105,18 +106,18 @@ object DownloadRepository {
             }
 
             val workDir = File(context.cacheDir, "work/${task.id}").apply { mkdirs() }
-            val spec = DownloadSpec(
+            var spec = DownloadSpec(
                 url = resolvedUrl,
                 quality = task.quality,
                 outputDir = workDir,
                 cookieFile = cookies,
             )
 
-            // Some sites (Douyin) reject the first attempt but leave the cookie
-            // file in a state that makes the next one work — see
-            // SiteHandler.transientFailureRetries. Re-run in place rather than
-            // making the user tap "download" again.
+            // Some sites (Douyin) answer an identical, valid request only some
+            // of the time — see SiteHandler.transientFailureRetries. Re-run in
+            // place rather than making the user tap "download" again.
             var result: Result<List<File>> = Result.failure(IllegalStateException("未开始"))
+            var refetchedCookies = false
             val maxAttempts = 1 + handler.transientFailureRetries.coerceAtLeast(0)
             for (attempt in 1..maxAttempts) {
                 result = YtDlpEngine.download(context, spec, handler, task.id) { percent, _, line ->
@@ -127,40 +128,111 @@ object DownloadRepository {
                     }
                 }
                 val ok = result.getOrNull()?.isNotEmpty() == true
-                val cancelled = _tasks.value.firstOrNull { it.id == task.id }?.state is TaskState.Cancelled
-                if (ok || cancelled || attempt == maxAttempts) break
-                update(task.id) { it.copy(state = TaskState.Running(0f, "请求被拦截，正在自动重试…")) }
-                // Back off further each round: these rejections are rate-based,
-                // so retrying at a fixed interval can keep hitting the same wall.
-                delay(1_500L * attempt)
+                if (ok || isCancelled(task.id) || attempt == maxAttempts) break
+
+                // A jar the site refuses is worth replacing once — it may simply
+                // be too old. Only once, though: re-minting it measurably does
+                // not improve the odds, and each bootstrap costs a WebView load
+                // of up to 40s, which across six attempts would be minutes of
+                // waiting to buy nothing.
+                if (needsFreshCookies(result.exceptionOrNull()) && !refetchedCookies) {
+                    refetchedCookies = true
+                    update(task.id) { it.copy(state = TaskState.Running(0f, "凭证失效，正在重新获取…")) }
+                    CookieBootstrapper.ensure(context, handler, force = true)
+                    spec = spec.copy(cookieFile = CookieStore.cookieFileOrNull(context, handler.id))
+                } else {
+                    val note = "请求被拦截，正在重试（$attempt/${maxAttempts - 1}）…"
+                    update(task.id) { it.copy(state = TaskState.Running(0f, note)) }
+                }
+                // A short back-off, capped: the refusals are probabilistic rather
+                // than rate-based, so waiting longer buys nothing and the user is
+                // watching a spinner the whole time.
+                delay(minOf(1_500L * attempt, 3_000L))
             }
 
-            result.fold(
-                onSuccess = { files ->
-                    if (files.isEmpty()) {
-                        update(task.id) { it.copy(state = TaskState.Failed("yt-dlp 没有产出文件")) }
+            var files = result.getOrNull().orEmpty()
+
+            // yt-dlp has run out of options. Fall back to letting the site's own
+            // player fetch the video and taking the URL it uses — see
+            // [MediaSniffer] for why that survives where the extractor does not.
+            if (files.isEmpty() && !isCancelled(task.id) && handler.sniffPageUrl(resolvedUrl) != null) {
+                update(task.id) { it.copy(state = TaskState.Running(0f, "常规解析失败，改用浏览器方式…")) }
+                MediaSniffer.sniff(context, handler, resolvedUrl)?.let { sniffed ->
+                    val name = "${handler.displayName} - ${sniffed.pageUrl.substringAfterLast('/')}.mp4"
+                    DirectDownloader.fetch(sniffed, File(workDir, name)) { percent, line ->
+                        update(task.id) { current ->
+                            if (current.state is TaskState.Cancelled) current
+                            else current.copy(state = TaskState.Running(percent, line))
+                        }
+                    }.fold(
+                        onSuccess = { files = listOf(it) },
+                        onFailure = { e -> Log.w(TAG, "${handler.id}: direct fetch failed", e) },
+                    )
+                }
+            }
+
+            when {
+                isCancelled(task.id) -> Unit
+                files.isNotEmpty() -> {
+                    val saved = files.mapNotNull { MediaStoreSaver.publish(context, it).getOrNull() }
+                    if (saved.isEmpty()) {
+                        update(task.id) { it.copy(state = TaskState.Failed("保存到相册失败")) }
                     } else {
-                        val saved = files.mapNotNull { MediaStoreSaver.publish(context, it).getOrNull() }
-                        if (saved.isEmpty()) {
-                            update(task.id) { it.copy(state = TaskState.Failed("保存到相册失败")) }
-                        } else {
-                            val first = saved.first()
-                            update(task.id) {
-                                it.copy(state = TaskState.Done(first.publicPath, first.uri, saved.size))
-                            }
+                        val first = saved.first()
+                        update(task.id) {
+                            it.copy(state = TaskState.Done(first.publicPath, first.uri, saved.size))
                         }
                     }
-                },
-                onFailure = { e ->
-                    val cancelled = _tasks.value.firstOrNull { it.id == task.id }?.state is TaskState.Cancelled
-                    if (!cancelled) {
-                        update(task.id) { it.copy(state = TaskState.Failed(friendlyError(e, handler.id))) }
-                    }
-                },
-            )
+                }
+                else -> {
+                    val error = result.exceptionOrNull()
+                    val reason = error?.let { friendlyError(it, handler.id) } ?: "没有产出文件"
+                    val detail = diagnostics(context, handler, resolvedUrl, error)
+                    update(task.id) { it.copy(state = TaskState.Failed(reason, detail)) }
+                }
+            }
 
             workDir.deleteRecursively()
         }
+    }
+
+    private fun isCancelled(taskId: String): Boolean =
+        _tasks.value.firstOrNull { it.id == taskId }?.state is TaskState.Cancelled
+
+    /**
+     * Douyin's exact wording when its anti-bot refuses the jar we sent. Matched
+     * narrowly on purpose: the same extractor also mentions cookies when a
+     * video simply does not exist, and re-fetching cookies for that would just
+     * burn 30 seconds before failing anyway.
+     */
+    private fun needsFreshCookies(e: Throwable?): Boolean =
+        e?.message?.contains("fresh cookies", ignoreCase = true) == true
+
+    /**
+     * Everything needed to tell apart "this phone's cookies are broken" from
+     * "this network is blocked" without being in the same room as the phone.
+     * Surfaced behind the 详情 button on a failed row.
+     */
+    private suspend fun diagnostics(
+        context: Context,
+        handler: com.zorro.videodl.core.SiteHandler,
+        resolvedUrl: String,
+        error: Throwable?,
+    ): String = buildString {
+        appendLine("站点: ${handler.id}")
+        appendLine("解析后链接: $resolvedUrl")
+        val stored = CookieStore.storedCookieNames(context, handler.id)
+        appendLine("已存凭证: ${if (stored.isEmpty()) "（无）" else stored.joinToString(", ")}")
+        handler.cookieBootstrap?.let { bootstrap ->
+            val wanted = listOf(bootstrap.requiredCookie) + bootstrap.serverCookies
+            appendLine("缺少凭证: ${wanted.filterNot { it in stored }.ifEmpty { listOf("（无）") }.joinToString(", ")}")
+        }
+        CookieStore.ageSinceFetch(context, handler.id)?.let { appendLine("凭证获取于 ${it / 1000} 秒前") }
+        appendLine("yt-dlp: ${YtDlpEngine.version(context) ?: "未知"}")
+        appendLine("应用版本: ${BuildConfig.VERSION_NAME}")
+        appendLine()
+        appendLine("原始错误:")
+        append(error?.message?.trim()?.takeIf { it.isNotBlank() } ?: error?.toString() ?: "（无输出）")
     }
 
     private val PERCENT = Regex("""(\d{1,3}(?:\.\d+)?)%""")

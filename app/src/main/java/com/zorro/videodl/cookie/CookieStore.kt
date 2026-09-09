@@ -28,7 +28,36 @@ object CookieStore {
 
     fun clear(context: Context, siteId: String) {
         fileFor(context, siteId).delete()
+        stampFor(context, siteId).delete()
     }
+
+    /**
+     * Names of the cookies currently stored for the site.
+     *
+     * yt-dlp rewrites the jar on exit, so the file's own mtime says nothing
+     * about when these values were obtained — hence the separate stamp below.
+     */
+    fun storedCookieNames(context: Context, siteId: String): Set<String> =
+        cookieFileOrNull(context, siteId)
+            ?.readLines()
+            ?.filterNot { it.startsWith("#") || it.isBlank() }
+            ?.mapNotNull { it.split('\t').getOrNull(5) }
+            ?.toSet()
+            .orEmpty()
+
+    private fun stampFor(context: Context, siteId: String): File = File(dir(context), "$siteId.stamp")
+
+    /** Records that the jar was just fetched from the site itself. */
+    fun markFetched(context: Context, siteId: String) {
+        runCatching { stampFor(context, siteId).writeText(System.currentTimeMillis().toString()) }
+    }
+
+    /** Milliseconds since the last [markFetched], or null if it was never fetched. */
+    fun ageSinceFetch(context: Context, siteId: String): Long? =
+        stampFor(context, siteId)
+            .takeIf { it.exists() }
+            ?.let { runCatching { it.readText().trim().toLong() }.getOrNull() }
+            ?.let { System.currentTimeMillis() - it }
 
     /**
      * Harvests every cookie the WebView holds for the handler's domains and

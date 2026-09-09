@@ -12,7 +12,30 @@ data class YtDlpOption(val flag: String, val value: String? = null)
  * silently instead of sending the user through a "login" with nothing to log
  * in to.
  */
-data class CookieBootstrap(val url: String, val requiredCookie: String)
+data class CookieBootstrap(
+    val url: String,
+    /**
+     * The cookie whose presence proves the page's scripts ran. Typically
+     * generated locally by that JavaScript, so it appears almost immediately.
+     */
+    val requiredCookie: String,
+    /**
+     * Cookies worth waiting a little longer for, but which the jar is still
+     * usable without. They arrive after [requiredCookie], and on some networks
+     * never at all — Douyin serves mainland China a cut-down landing page that
+     * simply does not set them. Requiring them there meant no jar was ever
+     * written, so put only genuinely optional extras here.
+     */
+    val serverCookies: List<String> = emptyList(),
+    /** How long to keep waiting for [serverCookies] after [requiredCookie] shows up. */
+    val settleMs: Long = 10_000,
+    /**
+     * How long a stored jar is trusted before it is fetched again. These
+     * cookies are short-lived anti-bot tokens; the stored expiry cannot be
+     * read back from the WebView, so age is tracked separately.
+     */
+    val maxAgeMs: Long = 6 * 60 * 60 * 1000,
+)
 
 enum class Quality(val label: String) {
     BEST("最高画质"),
@@ -36,7 +59,12 @@ sealed interface TaskState {
     data object Resolving : TaskState
     data class Running(val percent: Float, val line: String) : TaskState
     data class Done(val savedTo: String, val uri: String?, val fileCount: Int = 1) : TaskState
-    data class Failed(val reason: String) : TaskState
+    /**
+     * [reason] is the one-line explanation shown in the row; [detail] keeps the
+     * untouched tool output behind a "详情" button, because a failure that only
+     * reproduces on someone else's phone is otherwise impossible to diagnose.
+     */
+    data class Failed(val reason: String, val detail: String? = null) : TaskState
     data object Cancelled : TaskState
 }
 

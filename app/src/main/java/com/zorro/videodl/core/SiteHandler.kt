@@ -62,6 +62,21 @@ interface SiteHandler {
     /** yt-dlp `-o` template. `.100B` caps the title at 100 *bytes* so CJK
      *  filenames cannot overflow the filesystem limit. */
     fun outputTemplate(): String = "%(title).100B [%(id)s].%(ext)s"
+
+    /**
+     * Page to open in a real browser engine when yt-dlp has given up, so the
+     * media URL can be read off the requests the page itself makes. Returning
+     * null (the default) means the site has no such fallback.
+     *
+     * This exists because an extractor and a browser are judged differently by
+     * the same anti-bot: yt-dlp's plain API call can be refused on a network
+     * where the site's own player loads fine. When that happens, watching what
+     * the player fetches is the only thing left that still works.
+     */
+    fun sniffPageUrl(resolvedUrl: String): String? = null
+
+    /** Whether a URL requested by that page is the media stream we are after. */
+    fun isMediaUrl(url: String): Boolean = false
 }
 
 /** Shared default: progressive-fallback selector capped at a height. */

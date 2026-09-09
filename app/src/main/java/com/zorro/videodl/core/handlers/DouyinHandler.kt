@@ -24,12 +24,25 @@ object DouyinHandler : SiteHandler {
     override val loginUrl: String? = null
     override val cookieDomains = listOf(".douyin.com")
 
-    // yt-dlp's Douyin extractor returns no formats without this, and cannot
-    // generate it (its source says fresh cookies are needed and ships no
-    // solver) — the value comes out of douyin.com's own JavaScript.
+    // ttwid is the one cookie that matters: measured against the extractor's
+    // own endpoint, a jar holding nothing else answers just as often as a full
+    // 28-cookie browser jar, and a request with no cookies at all is refused
+    // every single time.
+    //
+    // It used to require s_v_web_id instead, which is why this failed in
+    // mainland China and nowhere else. Douyin serves a mobile UA there a
+    // cut-down "download the app" landing page whose scripts never run, so
+    // s_v_web_id and odin_tt never appear — the bootstrap waited for one of
+    // them, timed out, and returned without ever writing a jar. The download
+    // then ran with no cookies, which cannot succeed. That page does still set
+    // ttwid, so requiring only ttwid is what makes this work there.
+    //
+    // The other two stay listed as optional: on networks that serve the real
+    // page they show up within a second and a fuller jar does no harm.
     override val cookieBootstrap = CookieBootstrap(
         url = "https://www.douyin.com/",
-        requiredCookie = "s_v_web_id",
+        requiredCookie = "ttwid",
+        serverCookies = listOf("s_v_web_id", "odin_tt"),
     )
 
     override suspend fun normalizeUrl(url: String): String {
@@ -50,23 +63,54 @@ object DouyinHandler : SiteHandler {
 
     private val SHARE_VIDEO_ID = Regex("""iesdouyin\.com/share/video/(\d+)""", RegexOption.IGNORE_CASE)
 
+    /**
+     * Disabled after measuring it (2026-09-08). Kept, rather than deleted,
+     * because the mechanism is sound for sites that simply play on load — it is
+     * Douyin specifically that defeats it.
+     *
+     * On a real device the watch page loads, but the `<video>` element sits at
+     * `readyState = 0` with an empty `currentSrc` for the full 40s window and
+     * issues no media request at all: the player waits on the verification
+     * challenge (`rc-verifycenter/rmc-captcha` shows up in the page's console)
+     * before it will source anything. It plays on some runs and not others, so
+     * enabling this would trade a fast, accurate error for a 40-second wait
+     * that usually ends in the same error.
+     *
+     * Two facts worth keeping for whoever picks this up: the page *does* fetch
+     * `aweme/v1/web/aweme/detail/` with fully-signed query parameters — the
+     * very signature yt-dlp cannot compute — so capturing that request and
+     * replaying it is the promising route; and `shouldInterceptRequest` never
+     * sees `<video>` media loads at all (they bypass the renderer's network
+     * path), so any future attempt must read the player, not the requests.
+     */
+    override fun sniffPageUrl(resolvedUrl: String): String? = null
+
     override fun formatSelector(quality: Quality): String = cappedSelector(quality)
 
-    // Deliberately no forced --user-agent/--referer here: guessing one burned
-    // us on Xiaohongshu (a mobile UA made the extractor come back empty).
-    // Add headers only after a real failure shows yt-dlp's own defaults
-    // aren't enough for this site.
+    // The Referer is not decoration: DouyinIE fetches aweme/v1/web/aweme/detail/
+    // without one, and that request is refused every time when the jar holds
+    // only ttwid. Sending it took the same request from 0/6 to 5/6 overseas and
+    // 2/6 from a mainland exit. A forced --user-agent is still deliberately
+    // absent — the UA measurably does not matter here, and guessing one burned
+    // us on Xiaohongshu.
     override fun extraOptions(spec: DownloadSpec): List<YtDlpOption> = listOf(
         YtDlpOption("--merge-output-format", "mp4"),
         YtDlpOption("--no-playlist"),
+        YtDlpOption("--referer", "https://www.douyin.com/"),
     )
 
-    // Douyin's anti-bot rejects the first request made with only the bootstrap
-    // cookies, but its rejection response sets the extra cookies (ttwid/odin_tt/
-    // passport_csrf_token/…) that a real fetch needs. yt-dlp persists those back
-    // into the cookie file on exit, so an immediate re-run succeeds. This is the
-    // "tap download twice" workaround, done automatically.
-    override val transientFailureRetries = 1
+    // Douyin answers this endpoint probabilistically rather than deterministically:
+    // repeating one identical, valid request gets a video roughly half the time
+    // from an overseas exit and about a third of the time from a mainland one.
+    // Nothing distinguishes the good runs from the bad, so the only defence is
+    // to ask again. At worst a third of the time, six attempts miss on all six
+    // once in ~700 downloads; two attempts missed both roughly one time in nine,
+    // which is what "it works for me and never for him" actually looked like.
+    //
+    // Cheap, too: a refusal comes back in about a second, and re-minting the
+    // cookie jar between tries measurably does not help (fresh ttwid 6/10 vs
+    // reused 6/10), so the retries do not repeat the slow WebView bootstrap.
+    override val transientFailureRetries = 6
 
     /** Captions run long and are full of hashtag spam; uploader + id is stable and short. */
     override fun outputTemplate(): String = "%(uploader)s - %(id)s.%(ext)s"
