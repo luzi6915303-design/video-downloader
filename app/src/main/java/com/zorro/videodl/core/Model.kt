@@ -37,6 +37,28 @@ data class CookieBootstrap(
     val maxAgeMs: Long = 6 * 60 * 60 * 1000,
 )
 
+/**
+ * A watch page whose own API call carries the media. The app loads [pageUrl]
+ * in a WebView, lets the page's scripts sign and send that call as they
+ * normally would, and hands the response body to [parse].
+ */
+data class PageCapture(
+    val pageUrl: String,
+    /** Substring identifying the API request whose response carries the media. */
+    val apiPath: String,
+    /** Turns that response into files to fetch, or null when it holds nothing usable. */
+    val parse: (body: String, quality: Quality) -> CapturedMedia?,
+)
+
+data class CapturedMedia(
+    val title: String?,
+    val thumbnail: String?,
+    val files: List<MediaFile>,
+)
+
+/** One direct CDN link and the name to save it under, extension included. */
+data class MediaFile(val url: String, val fileName: String)
+
 enum class Quality(val label: String) {
     BEST("最高画质"),
     P1080("1080p"),

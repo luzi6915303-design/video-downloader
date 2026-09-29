@@ -1,11 +1,16 @@
 package com.zorro.videodl.core.handlers
 
+import com.zorro.videodl.core.CapturedMedia
 import com.zorro.videodl.core.CookieBootstrap
 import com.zorro.videodl.core.DownloadSpec
+import com.zorro.videodl.core.MediaFile
+import com.zorro.videodl.core.PageCapture
 import com.zorro.videodl.core.Quality
 import com.zorro.videodl.core.SiteHandler
 import com.zorro.videodl.core.YtDlpOption
 import com.zorro.videodl.core.cappedSelector
+import org.json.JSONArray
+import org.json.JSONObject
 
 object DouyinHandler : SiteHandler {
     override val id = "douyin"
@@ -110,7 +115,112 @@ object DouyinHandler : SiteHandler {
     // Cheap, too: a refusal comes back in about a second, and re-minting the
     // cookie jar between tries measurably does not help (fresh ttwid 6/10 vs
     // reused 6/10), so the retries do not repeat the slow WebView bootstrap.
-    override val transientFailureRetries = 6
+    //
+    // Since mid-September 2026 this no longer holds: the endpoint answers 403
+    // "Blocked by ArgusSecurityPlugin" to every request the page did not sign
+    // itself, 0/6 from overseas with or without cookies. yt-dlp is now only the
+    // fallback behind [pageCapture], so one retry is kept in case an updated
+    // extractor catches up, rather than six that are known to miss.
+    override val transientFailureRetries = 1
+
+    /**
+     * The primary route since Douyin started refusing unsigned API calls: load
+     * the watch page and read the detail JSON it fetches for itself. See
+     * [com.zorro.videodl.download.PageCapturer].
+     */
+    override fun pageCapture(resolvedUrl: String): PageCapture? {
+        val id = CANONICAL_VIDEO_ID.find(resolvedUrl)?.groupValues?.get(1) ?: return null
+        return PageCapture(
+            pageUrl = "https://www.douyin.com/video/$id",
+            apiPath = "/aweme/v1/web/aweme/detail/",
+            parse = ::parseDetail,
+        )
+    }
+
+    private val CANONICAL_VIDEO_ID = Regex("""douyin\.com/video/(\d+)""", RegexOption.IGNORE_CASE)
+
+    /**
+     * Picks what to download out of an `aweme/detail` response. Null when the
+     * body is not a usable answer — the page's first call often comes back
+     * empty, and the capturer keeps listening for the next one.
+     */
+    internal fun parseDetail(body: String, quality: Quality): CapturedMedia? {
+        if (body.isBlank()) return null
+        val aweme = JSONObject(body).optJSONObject("aweme_detail") ?: return null
+        val id = aweme.optString("aweme_id")
+        val author = aweme.optJSONObject("author")?.optString("nickname").orEmpty()
+        // Same shape as outputTemplate(), so both routes name files alike.
+        val base = safeFileName(listOf(author, id).filter { it.isNotBlank() }.joinToString(" - "))
+        val video = aweme.optJSONObject("video")
+
+        val images = aweme.optJSONArray("images")
+        val files = when {
+            // A photo post (图文) carries a slideshow "video" that is only the
+            // background music over a still — the pictures are the content.
+            images != null && images.length() > 0 -> (0 until images.length()).mapNotNull { i ->
+                images.optJSONObject(i)?.firstUrl()?.let { MediaFile(it, "$base-${i + 1}.${imageExt(it)}") }
+            }
+            // No separate audio track is offered; the post's sound is published
+            // as its "music", which for a creator's own clip is the clip's audio.
+            quality == Quality.AUDIO_ONLY ->
+                listOfNotNull(aweme.optJSONObject("music")?.optJSONObject("play_url")?.firstUrl()
+                    ?.let { MediaFile(it, "$base.mp3") })
+            else -> listOfNotNull(pickStream(video, quality)?.let { MediaFile(it, "$base.mp4") })
+        }
+        if (files.isEmpty()) return null
+
+        return CapturedMedia(
+            title = aweme.optString("desc").takeIf { it.isNotBlank() },
+            thumbnail = video?.optJSONObject("cover")?.firstUrl(),
+            files = files,
+        )
+    }
+
+    /**
+     * Highest-quality progressive MP4 within the requested cap. The cap is on
+     * the short side, since most of these are portrait and "720p" means 720
+     * wide there. When nothing fits under the cap it takes the smallest stream
+     * rather than the best: whoever asked for 480p was trying to save data.
+     */
+    private fun pickStream(video: JSONObject?, quality: Quality): String? {
+        video ?: return null
+        val cap = when (quality) {
+            Quality.P1080 -> 1080
+            Quality.P720 -> 720
+            Quality.P480 -> 480
+            else -> Int.MAX_VALUE
+        }
+        data class Stream(val url: String, val shortSide: Int, val bitrate: Int)
+        val streams = video.optJSONArray("bit_rate").objects().mapNotNull { rate ->
+            if (rate.optString("format").equals("dash", ignoreCase = true)) return@mapNotNull null
+            val addr = rate.optJSONObject("play_addr") ?: return@mapNotNull null
+            val url = addr.firstUrl() ?: return@mapNotNull null
+            Stream(url, minOf(addr.optInt("width"), addr.optInt("height")), rate.optInt("bit_rate"))
+        }
+        val best = compareBy<Stream>({ it.shortSide }, { it.bitrate })
+        return (streams.filter { it.shortSide <= cap }.maxWithOrNull(best) ?: streams.minWithOrNull(best))?.url
+            ?: video.optJSONObject("play_addr")?.firstUrl()
+    }
+
+    private fun JSONObject.firstUrl(): String? =
+        optJSONArray("url_list")?.let { list ->
+            (0 until list.length()).map { list.optString(it) }.firstOrNull { it.startsWith("http") }
+        }
+
+    private fun JSONArray?.objects(): List<JSONObject> =
+        if (this == null) emptyList() else (0 until length()).mapNotNull { optJSONObject(it) }
+
+    private fun imageExt(url: String): String {
+        val path = url.substringBefore('?').lowercase()
+        return when {
+            path.endsWith(".jpeg") || path.endsWith(".jpg") -> "jpg"
+            path.endsWith(".png") -> "png"
+            else -> "webp"
+        }
+    }
+
+    private fun safeFileName(name: String): String =
+        name.replace(Regex("""[\\/:*?"<>|\r\n]+"""), " ").trim().take(80).ifBlank { "douyin" }
 
     /** Captions run long and are full of hashtag spam; uploader + id is stable and short. */
     override fun outputTemplate(): String = "%(uploader)s - %(id)s.%(ext)s"

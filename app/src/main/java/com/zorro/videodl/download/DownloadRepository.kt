@@ -3,9 +3,11 @@ package com.zorro.videodl.download
 import android.content.Context
 import android.util.Log
 import com.zorro.videodl.BuildConfig
+import com.zorro.videodl.core.CapturedMedia
 import com.zorro.videodl.core.DownloadSpec
 import com.zorro.videodl.core.DownloadTask
 import com.zorro.videodl.core.Quality
+import com.zorro.videodl.core.SiteHandler
 import com.zorro.videodl.core.SiteRegistry
 import com.zorro.videodl.core.TaskState
 import com.zorro.videodl.cookie.CookieBootstrapper
@@ -89,68 +91,38 @@ object DownloadRepository {
 
             update(task.id) { it.copy(state = TaskState.Resolving) }
 
-            // Sites like Douyin gate their extractor behind an anti-bot cookie
-            // that needs no account, just a real browser engine. Fetch it here
-            // rather than making the user find a "login" button for it.
-            CookieBootstrapper.ensure(context, handler)
-            val cookies = CookieStore.cookieFileOrNull(context, handler.id)
-
             val resolvedUrl = runCatching { handler.normalizeUrl(task.url) }.getOrDefault(task.url)
             // Worth keeping: when a share link resolves to something yt-dlp then
             // fails on, the expanded URL is the first thing you need to see.
             Log.d(TAG, "${handler.id}: ${task.url} -> $resolvedUrl")
 
-            // Best-effort metadata so the row has a real title while it downloads.
-            YtDlpEngine.probe(context, resolvedUrl, handler, cookies).getOrNull()?.let { info ->
-                update(task.id) { it.copy(title = info.title ?: info.fulltitle, thumbnail = info.thumbnail) }
-            }
-
             val workDir = File(context.cacheDir, "work/${task.id}").apply { mkdirs() }
-            var spec = DownloadSpec(
-                url = resolvedUrl,
-                quality = task.quality,
-                outputDir = workDir,
-                cookieFile = cookies,
-            )
-
-            // Some sites (Douyin) answer an identical, valid request only some
-            // of the time — see SiteHandler.transientFailureRetries. Re-run in
-            // place rather than making the user tap "download" again.
+            var files: List<File> = emptyList()
             var result: Result<List<File>> = Result.failure(IllegalStateException("未开始"))
-            var refetchedCookies = false
-            val maxAttempts = 1 + handler.transientFailureRetries.coerceAtLeast(0)
-            for (attempt in 1..maxAttempts) {
-                result = YtDlpEngine.download(context, spec, handler, task.id) { percent, _, line ->
-                    val shown = percentOf(line, percent)
-                    update(task.id) { current ->
-                        if (current.state is TaskState.Cancelled) current
-                        else current.copy(state = TaskState.Running(shown, tidyProgress(line)))
-                    }
-                }
-                val ok = result.getOrNull()?.isNotEmpty() == true
-                if (ok || isCancelled(task.id) || attempt == maxAttempts) break
 
-                // A jar the site refuses is worth replacing once — it may simply
-                // be too old. Only once, though: re-minting it measurably does
-                // not improve the odds, and each bootstrap costs a WebView load
-                // of up to 40s, which across six attempts would be minutes of
-                // waiting to buy nothing.
-                if (needsFreshCookies(result.exceptionOrNull()) && !refetchedCookies) {
-                    refetchedCookies = true
-                    update(task.id) { it.copy(state = TaskState.Running(0f, "凭证失效，正在重新获取…")) }
-                    CookieBootstrapper.ensure(context, handler, force = true)
-                    spec = spec.copy(cookieFile = CookieStore.cookieFileOrNull(context, handler.id))
+            // Sites whose API only answers the page itself (Douyin) are read off
+            // their own watch page first — see [PageCapturer]. yt-dlp stays
+            // behind it as the fallback, in case an extractor update catches up.
+            var captureNote: String? = null
+            handler.pageCapture(resolvedUrl)?.let { capture ->
+                update(task.id) { it.copy(state = TaskState.Running(0f, "正在打开网页读取视频…")) }
+                val media = PageCapturer.capture(context, handler, capture, task.quality)
+                if (media == null) {
+                    captureNote = "网页读取：没有拿到视频数据"
                 } else {
-                    val note = "请求被拦截，正在重试（$attempt/${maxAttempts - 1}）…"
-                    update(task.id) { it.copy(state = TaskState.Running(0f, note)) }
+                    update(task.id) { it.copy(title = media.title ?: it.title, thumbnail = media.thumbnail ?: it.thumbnail) }
+                    files = fetchCaptured(task.id, handler, capture.pageUrl, media, workDir)
+                    captureNote = if (files.isEmpty()) "网页读取：拿到了视频地址，但下载失败" else null
                 }
-                // A short back-off, capped: the refusals are probabilistic rather
-                // than rate-based, so waiting longer buys nothing and the user is
-                // watching a spinner the whole time.
-                delay(minOf(1_500L * attempt, 3_000L))
+                if (files.isEmpty() && !isCancelled(task.id)) {
+                    update(task.id) { it.copy(state = TaskState.Running(0f, "网页读取失败，改用常规解析…")) }
+                }
             }
 
-            var files = result.getOrNull().orEmpty()
+            if (files.isEmpty() && !isCancelled(task.id)) {
+                result = runExtractor(context, task, handler, resolvedUrl, workDir)
+                files = result.getOrNull().orEmpty()
+            }
 
             // yt-dlp has run out of options. Fall back to letting the site's own
             // player fetch the video and taking the URL it uses — see
@@ -187,7 +159,7 @@ object DownloadRepository {
                 else -> {
                     val error = result.exceptionOrNull()
                     val reason = error?.let { friendlyError(it, handler.id) } ?: "没有产出文件"
-                    val detail = diagnostics(context, handler, resolvedUrl, error)
+                    val detail = diagnostics(context, handler, resolvedUrl, error, captureNote)
                     update(task.id) { it.copy(state = TaskState.Failed(reason, detail)) }
                 }
             }
@@ -198,6 +170,100 @@ object DownloadRepository {
 
     private fun isCancelled(taskId: String): Boolean =
         _tasks.value.firstOrNull { it.id == taskId }?.state is TaskState.Cancelled
+
+    /**
+     * Fetches each file a [PageCapturer] run found. Returns only what arrived;
+     * a photo post that lost one picture still saves the rest.
+     */
+    private suspend fun fetchCaptured(
+        taskId: String,
+        handler: SiteHandler,
+        pageUrl: String,
+        media: CapturedMedia,
+        workDir: File,
+    ): List<File> {
+        val fetched = mutableListOf<File>()
+        media.files.forEachIndexed { index, file ->
+            if (isCancelled(taskId)) return fetched
+            val source = MediaSniffer.Sniffed(file.url, pageUrl, PageCapturer.DESKTOP_UA)
+            DirectDownloader.fetch(source, File(workDir, file.fileName)) { percent, line ->
+                val shown = if (media.files.size > 1) "(${index + 1}/${media.files.size}) $line" else line
+                update(taskId) { current ->
+                    if (current.state is TaskState.Cancelled) current
+                    else current.copy(state = TaskState.Running(percent, shown))
+                }
+            }.fold(
+                onSuccess = { fetched += it },
+                onFailure = { e -> Log.w(TAG, "${handler.id}: fetch of ${file.fileName} failed", e) },
+            )
+        }
+        return fetched
+    }
+
+    /** The yt-dlp route: anti-bot cookies, a metadata probe, then the download with retries. */
+    private suspend fun runExtractor(
+        context: Context,
+        task: DownloadTask,
+        handler: SiteHandler,
+        resolvedUrl: String,
+        workDir: File,
+    ): Result<List<File>> {
+        // Sites like Douyin gate their extractor behind an anti-bot cookie
+        // that needs no account, just a real browser engine. Fetch it here
+        // rather than making the user find a "login" button for it.
+        CookieBootstrapper.ensure(context, handler)
+        val cookies = CookieStore.cookieFileOrNull(context, handler.id)
+
+        // Best-effort metadata so the row has a real title while it downloads.
+        YtDlpEngine.probe(context, resolvedUrl, handler, cookies).getOrNull()?.let { info ->
+            update(task.id) { it.copy(title = info.title ?: info.fulltitle, thumbnail = info.thumbnail) }
+        }
+
+        var spec = DownloadSpec(
+            url = resolvedUrl,
+            quality = task.quality,
+            outputDir = workDir,
+            cookieFile = cookies,
+        )
+
+        // Some sites (Douyin) answer an identical, valid request only some
+        // of the time — see SiteHandler.transientFailureRetries. Re-run in
+        // place rather than making the user tap "download" again.
+        var result: Result<List<File>> = Result.failure(IllegalStateException("未开始"))
+        var refetchedCookies = false
+        val maxAttempts = 1 + handler.transientFailureRetries.coerceAtLeast(0)
+        for (attempt in 1..maxAttempts) {
+            result = YtDlpEngine.download(context, spec, handler, task.id) { percent, _, line ->
+                val shown = percentOf(line, percent)
+                update(task.id) { current ->
+                    if (current.state is TaskState.Cancelled) current
+                    else current.copy(state = TaskState.Running(shown, tidyProgress(line)))
+                }
+            }
+            val ok = result.getOrNull()?.isNotEmpty() == true
+            if (ok || isCancelled(task.id) || attempt == maxAttempts) break
+
+            // A jar the site refuses is worth replacing once — it may simply
+            // be too old. Only once, though: re-minting it measurably does
+            // not improve the odds, and each bootstrap costs a WebView load
+            // of up to 40s, which across several attempts would be minutes of
+            // waiting to buy nothing.
+            if (needsFreshCookies(result.exceptionOrNull()) && !refetchedCookies) {
+                refetchedCookies = true
+                update(task.id) { it.copy(state = TaskState.Running(0f, "凭证失效，正在重新获取…")) }
+                CookieBootstrapper.ensure(context, handler, force = true)
+                spec = spec.copy(cookieFile = CookieStore.cookieFileOrNull(context, handler.id))
+            } else {
+                val note = "请求被拦截，正在重试（$attempt/${maxAttempts - 1}）…"
+                update(task.id) { it.copy(state = TaskState.Running(0f, note)) }
+            }
+            // A short back-off, capped: the refusals are probabilistic rather
+            // than rate-based, so waiting longer buys nothing and the user is
+            // watching a spinner the whole time.
+            delay(minOf(1_500L * attempt, 3_000L))
+        }
+        return result
+    }
 
     /**
      * Douyin's exact wording when its anti-bot refuses the jar we sent. Matched
@@ -215,12 +281,14 @@ object DownloadRepository {
      */
     private suspend fun diagnostics(
         context: Context,
-        handler: com.zorro.videodl.core.SiteHandler,
+        handler: SiteHandler,
         resolvedUrl: String,
         error: Throwable?,
+        captureNote: String?,
     ): String = buildString {
         appendLine("站点: ${handler.id}")
         appendLine("解析后链接: $resolvedUrl")
+        captureNote?.let { appendLine(it) }
         val stored = CookieStore.storedCookieNames(context, handler.id)
         appendLine("已存凭证: ${if (stored.isEmpty()) "（无）" else stored.joinToString(", ")}")
         handler.cookieBootstrap?.let { bootstrap ->

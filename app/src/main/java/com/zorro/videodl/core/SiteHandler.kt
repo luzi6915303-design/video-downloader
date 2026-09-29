@@ -77,6 +77,16 @@ interface SiteHandler {
 
     /** Whether a URL requested by that page is the media stream we are after. */
     fun isMediaUrl(url: String): Boolean = false
+
+    /**
+     * Set when the media should be read off the site's own API response while
+     * its watch page loads in a WebView, *before* yt-dlp is tried. Returning
+     * null (the default) means the site goes straight to yt-dlp.
+     *
+     * For sites whose API now refuses anything that is not the page itself
+     * making the call, so the extractor has stopped being the primary route.
+     */
+    fun pageCapture(resolvedUrl: String): PageCapture? = null
 }
 
 /** Shared default: progressive-fallback selector capped at a height. */

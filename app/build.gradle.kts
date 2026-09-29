@@ -23,8 +23,8 @@ android {
         applicationId = "com.zorro.videodl"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.1.3"
+        versionCode = 6
+        versionName = "1.1.4"
 
         // Honor 400 Pro is arm64 only. Dropping other ABIs keeps the bundled
         // Python/yt-dlp payload from tripling the APK size.
@@ -101,6 +101,7 @@ dependencies {
     implementation(libs.androidx.material.icons.extended)
 
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.androidx.webkit)
 
     implementation(libs.youtubedl.library)
     implementation(libs.youtubedl.ffmpeg)
