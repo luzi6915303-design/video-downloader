@@ -1,0 +1,22 @@
+[Unit]
+Description=视频下载 App 站点可用性检测
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vdlcheck
+Group=vdlcheck
+ExecStart=/usr/bin/python3 /opt/vdlcheck/sitecheck.py
+Environment=XDG_CACHE_HOME=/var/lib/vdlcheck/cache
+TimeoutStartSec=30min
+# 这台机器还跑着代理和 AI 中转站，检测不能抢它们的资源
+Nice=10
+MemoryMax=300M
+CPUQuota=50%
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+# bin/ 可写是为了 yt-dlp -U 自我更新
+ReadWritePaths=/var/lib/vdlcheck /opt/vdlcheck/bin

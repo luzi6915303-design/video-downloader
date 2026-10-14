@@ -10,3 +10,6 @@ app/build/
 
 # Release APKs live on GitHub Releases, not in git history.
 dist/
+
+# Real test links: phone share links carry the sharer's device/account ids.
+tools/sitecheck/sites.json

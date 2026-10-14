@@ -1,0 +1,36 @@
+{
+  "_comment": "复制成 sites.json 再填真实链接。sites.json 不进 git：手机分享出来的短链接带着分享人的设备和账号标识。YouTube、B站会拦机房 IP，Instagram 要登录，都不放在这里。",
+  "sites": [
+    {
+      "name": "小红书",
+      "kind": "ytdlp",
+      "url": "https://xhslink.cn/o/XXXXXXXXXXX",
+      "expand": true,
+      "desktop_ua": true,
+      "referer": "https://www.xiaohongshu.com/",
+      "hint": "短链接跳转正常却下载失败时，可能是链接里的 xsec_token 过期了，先换一条新分享链接再判断是不是改版"
+    },
+    {
+      "name": "TikTok",
+      "kind": "ytdlp",
+      "url": "https://www.tiktok.com/@slow.english.podcast/video/7688725704640482581"
+    },
+    {
+      "name": "头条",
+      "kind": "ytdlp",
+      "url": "https://www.toutiao.com/video/7692048914442125864/"
+    },
+    {
+      "name": "X",
+      "kind": "ytdlp",
+      "url": "https://x.com/VicentYip/status/2110151395685146914"
+    },
+    {
+      "name": "抖音短链接",
+      "kind": "redirect",
+      "url": "https://v.douyin.com/XXXXXXXXXXX/",
+      "expect": "/video/\\d+",
+      "hint": "只测短链接能否跳转。App 下载抖音走内置浏览器，服务器测不了"
+    }
+  ]
+}
