@@ -12,7 +12,8 @@ object XiaohongshuHandler : SiteHandler {
 
     override val urlPatterns = listOf(
         Regex("""xiaohongshu\.com/(explore|discovery/item)/\w+""", RegexOption.IGNORE_CASE),
-        Regex("""xhslink\.com/\S+""", RegexOption.IGNORE_CASE),
+        // Share links moved from xhslink.com to xhslink.cn; both still circulate.
+        Regex("""xhslink\.(com|cn)/\S+""", RegexOption.IGNORE_CASE),
     )
 
     override val supportNote = "公开笔记无需登录"
@@ -23,11 +24,13 @@ object XiaohongshuHandler : SiteHandler {
         // Share text looks like "99 复制打开小红书… http://xhslink.com/a/xxxx 点击链接…",
         // so pull the bare URL out before touching the network.
         val bare = Regex("""https?://\S+""").find(url)?.value?.trimEnd('，', '。', '、', ',', '.') ?: url
-        val expanded = if (bare.contains("xhslink.com")) UrlResolver.follow(bare) else bare
+        val expanded = if (SHORT_LINK.containsMatchIn(bare)) UrlResolver.follow(bare) else bare
         // Unlike other sites the query string is load-bearing here: the
         // xsec_token/xsec_source pair is what authorises the note fetch.
         return expanded
     }
+
+    private val SHORT_LINK = Regex("""xhslink\.(com|cn)/""", RegexOption.IGNORE_CASE)
 
     override fun formatSelector(quality: Quality): String = cappedSelector(quality)
 

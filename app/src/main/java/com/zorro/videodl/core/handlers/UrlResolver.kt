@@ -5,7 +5,7 @@ import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
 
-/** Expands short links (xhslink.com, t.co) by walking their redirect chain. */
+/** Expands short links (xhslink.com/.cn, t.co) by walking their redirect chain. */
 object UrlResolver {
     private const val MAX_HOPS = 6
     private const val UA =
