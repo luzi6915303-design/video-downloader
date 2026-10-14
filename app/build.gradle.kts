@@ -23,12 +23,20 @@ android {
         applicationId = "com.zorro.videodl"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.1.4"
+        versionCode = 9
+        versionName = "1.1.7"
 
         // Honor 400 Pro is arm64 only. Dropping other ABIs keeps the bundled
         // Python/yt-dlp payload from tripling the APK size.
         ndk { abiFilters += "arm64-v8a" }
+
+        // Self-update manifest on our own server (Oracle Node2, nginx :8080).
+        // tools/publish-update.sh writes it; the APK sits next to it.
+        buildConfigField(
+            "String",
+            "UPDATE_URL",
+            "\"https://luzi303.bbroot.com:8080/apps/videodl/latest.json\"",
+        )
     }
 
     signingConfigs {

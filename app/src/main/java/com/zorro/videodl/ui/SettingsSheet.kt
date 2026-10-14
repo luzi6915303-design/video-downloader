@@ -43,6 +43,10 @@ fun SettingsSheet(
     clipboardAutoStart: Boolean,
     onDismiss: () -> Unit,
     onUpdateYtDlp: () -> Unit,
+    appVersion: String,
+    checkingUpdate: Boolean,
+    appUpdateStatus: String?,
+    onCheckAppUpdate: () -> Unit,
     onLogin: (SiteHandler) -> Unit,
     onLogout: (SiteHandler) -> Unit,
     onClipboardWatchChange: (Boolean) -> Unit,
@@ -88,6 +92,29 @@ fun SettingsSheet(
             }
             Text(
                 "网站改版导致下载失败时，先更新 yt-dlp——多数情况下这就能修好，不用重装 App。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("App 本身", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "当前 v$appVersion" + (appUpdateStatus?.let { "，$it" } ?: ""),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                TextButton(onClick = onCheckAppUpdate, enabled = !checkingUpdate) {
+                    Text(if (checkingUpdate) "检查中…" else "检查更新")
+                }
+            }
+            Text(
+                "yt-dlp 修不好的问题，需要更新 App 本身。打开 App 时也会自动检查。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

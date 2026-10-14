@@ -33,8 +33,14 @@ import com.zorro.videodl.engine.YtDlpEngine
 import com.zorro.videodl.ui.AppTheme
 import com.zorro.videodl.ui.MainScreen
 import com.zorro.videodl.ui.SettingsSheet
+import com.zorro.videodl.ui.UpdateDialog
+import com.zorro.videodl.ui.UpdateUi
+import com.zorro.videodl.update.AppUpdater
+import com.zorro.videodl.update.Release
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import java.io.File
 
 class MainActivity : ComponentActivity() {
 
@@ -108,6 +114,11 @@ class MainActivity : ComponentActivity() {
         var updating by remember { mutableStateOf(false) }
         var clipboardWatch by remember { mutableStateOf(settings.clipboardWatch) }
         var clipboardAutoStart by remember { mutableStateOf(settings.clipboardAutoStart) }
+        var updateUi by remember { mutableStateOf<UpdateUi?>(null) }
+        var updateJob by remember { mutableStateOf<Job?>(null) }
+        var updateApk by remember { mutableStateOf<File?>(null) }
+        var checkingUpdate by remember { mutableStateOf(false) }
+        var appUpdateStatus by remember { mutableStateOf<String?>(null) }
         val loggedInSites = remember(epoch, showSettings) {
             SiteRegistry.loginCapable.filter { CookieStore.hasCookies(this, it.id) }.map { it.id }.toSet()
         }
@@ -136,6 +147,38 @@ class MainActivity : ComponentActivity() {
             // version() returns null on a fresh install: the library only records a
             // version string after an update run, so null means "bundled", not "failed".
             ytDlpVersion = YtDlpEngine.version(this@MainActivity) ?: "已就绪（内置版本，检查更新后显示版本号）"
+        }
+
+        fun downloadUpdate(release: Release) {
+            updateUi = UpdateUi.Downloading(release, 0f)
+            updateJob = lifecycleScope.launch {
+                AppUpdater.download(this@MainActivity, release) { p ->
+                    if (updateUi is UpdateUi.Downloading) updateUi = UpdateUi.Downloading(release, p)
+                }.onSuccess {
+                    updateApk = it
+                    updateUi = UpdateUi.Ready(release, needsPermission = !AppUpdater.canInstall(this@MainActivity))
+                }.onFailure {
+                    if (updateUi is UpdateUi.Downloading) {
+                        updateUi = UpdateUi.Failed(release, "下载失败：${it.message?.take(120)}")
+                    }
+                }
+            }
+        }
+
+        fun installUpdate(release: Release) {
+            val apk = updateApk ?: return downloadUpdate(release)
+            if (AppUpdater.canInstall(this)) {
+                startActivity(AppUpdater.installIntent(this, apk))
+            } else {
+                updateUi = UpdateUi.Ready(release, needsPermission = true)
+                startActivity(AppUpdater.permissionIntent(this))
+            }
+        }
+
+        // Checked on every launch; a failed check stays silent so being offline
+        // never gets in the way of downloading.
+        LaunchedEffect(Unit) {
+            AppUpdater.check().getOrNull()?.let { updateUi = UpdateUi.Available(it) }
         }
 
         // Clipboard is only readable while focused, so re-check on every resume.
@@ -195,6 +238,26 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 },
+                appVersion = BuildConfig.VERSION_NAME,
+                checkingUpdate = checkingUpdate,
+                appUpdateStatus = appUpdateStatus,
+                onCheckAppUpdate = {
+                    checkingUpdate = true
+                    appUpdateStatus = null
+                    lifecycleScope.launch {
+                        val result = AppUpdater.check()
+                        checkingUpdate = false
+                        result.onSuccess { release ->
+                            // Shown inside the sheet: a snackbar would sit behind it.
+                            if (release == null) {
+                                appUpdateStatus = "已是最新"
+                            } else {
+                                showSettings = false
+                                updateUi = UpdateUi.Available(release)
+                            }
+                        }.onFailure { appUpdateStatus = "检查失败：${it.message?.take(80)}" }
+                    }
+                },
                 onLogin = { site: SiteHandler -> loginLauncher.launch(LoginActivity.intent(this, site.id)) },
                 onLogout = { site: SiteHandler ->
                     CookieStore.clear(this, site.id)
@@ -210,6 +273,18 @@ class MainActivity : ComponentActivity() {
                 onClipboardAutoStartChange = {
                     clipboardAutoStart = it
                     settings.clipboardAutoStart = it
+                },
+            )
+        }
+
+        updateUi?.let { state ->
+            UpdateDialog(
+                state = state,
+                onUpdate = { downloadUpdate(state.release) },
+                onInstall = { installUpdate(state.release) },
+                onDismiss = {
+                    updateJob?.cancel()
+                    updateUi = null
                 },
             )
         }
