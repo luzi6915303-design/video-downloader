@@ -12,6 +12,8 @@ import com.zorro.videodl.core.SiteRegistry
 import com.zorro.videodl.core.TaskState
 import com.zorro.videodl.cookie.CookieBootstrapper
 import com.zorro.videodl.cookie.CookieStore
+import com.zorro.videodl.data.DownloadHistory
+import com.zorro.videodl.data.HistoryEntry
 import com.zorro.videodl.engine.YtDlpEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -154,6 +156,7 @@ object DownloadRepository {
                         update(task.id) {
                             it.copy(state = TaskState.Done(first.publicPath, first.uri, saved.size))
                         }
+                        recordHistory(task.id, first, saved.size)
                     }
                 }
                 else -> {
@@ -166,6 +169,24 @@ object DownloadRepository {
 
             workDir.deleteRecursively()
         }
+    }
+
+    private fun recordHistory(taskId: String, saved: MediaStoreSaver.Saved, fileCount: Int) {
+        val task = _tasks.value.firstOrNull { it.id == taskId } ?: return
+        DownloadHistory.record(
+            HistoryEntry(
+                id = task.id,
+                url = task.url,
+                siteId = task.siteId,
+                siteName = task.siteName,
+                title = task.title,
+                qualityLabel = task.quality.label,
+                savedTo = saved.publicPath,
+                uri = saved.uri,
+                fileCount = fileCount,
+                finishedAt = System.currentTimeMillis(),
+            )
+        )
     }
 
     private fun isCancelled(taskId: String): Boolean =

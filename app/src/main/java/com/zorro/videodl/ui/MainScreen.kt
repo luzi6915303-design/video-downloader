@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -83,6 +84,7 @@ fun MainScreen(
     onRemove: (String) -> Unit,
     onClearFinished: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenHistory: () -> Unit,
     onAcceptClip: () -> Unit,
     onDismissClip: () -> Unit,
 ) {
@@ -109,6 +111,9 @@ fun MainScreen(
                         IconButton(onClick = onClearFinished) {
                             Icon(Icons.Default.Delete, contentDescription = "清除已完成")
                         }
+                    }
+                    IconButton(onClick = onOpenHistory) {
+                        Icon(Icons.Default.History, contentDescription = "下载历史")
                     }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Default.Settings, contentDescription = "设置")

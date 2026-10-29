@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import androidx.core.net.toUri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -27,10 +28,12 @@ import com.zorro.videodl.core.SiteRegistry
 import com.zorro.videodl.cookie.CookieStore
 import com.zorro.videodl.cookie.LoginActivity
 import com.zorro.videodl.data.Settings
+import com.zorro.videodl.data.DownloadHistory
 import com.zorro.videodl.download.DownloadRepository
 import com.zorro.videodl.download.DownloadService
 import com.zorro.videodl.engine.YtDlpEngine
 import com.zorro.videodl.ui.AppTheme
+import com.zorro.videodl.ui.HistorySheet
 import com.zorro.videodl.ui.MainScreen
 import com.zorro.videodl.ui.SettingsSheet
 import com.zorro.videodl.ui.UpdateDialog
@@ -109,6 +112,8 @@ class MainActivity : ComponentActivity() {
         var urlText by remember { mutableStateOf("") }
         var quality by remember { mutableStateOf(settings.defaultQuality) }
         var showSettings by remember { mutableStateOf(false) }
+        var showHistory by remember { mutableStateOf(false) }
+        val history by DownloadHistory.entries.collectAsState()
         var pendingClip by remember { mutableStateOf<String?>(null) }
         var ytDlpVersion by remember { mutableStateOf<String?>(null) }
         var updating by remember { mutableStateOf(false) }
@@ -212,12 +217,32 @@ class MainActivity : ComponentActivity() {
             onRemove = DownloadRepository::remove,
             onClearFinished = DownloadRepository::clearFinished,
             onOpenSettings = { showSettings = true },
+            onOpenHistory = { showHistory = true },
             onAcceptClip = {
                 pendingClip?.let { start(it) }
                 pendingClip = null
             },
             onDismissClip = { pendingClip = null },
         )
+
+        if (showHistory) {
+            HistorySheet(
+                entries = history,
+                onDismiss = { showHistory = false },
+                onOpen = { uri ->
+                    // The file may have been deleted from the gallery since; that
+                    // is not worth a crash, the viewer simply fails to open.
+                    runCatching {
+                        startActivity(
+                            Intent(Intent.ACTION_VIEW, uri.toUri())
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        )
+                    }
+                },
+                onRemove = DownloadHistory::remove,
+                onClear = DownloadHistory::clear,
+            )
+        }
 
         if (showSettings) {
             SettingsSheet(
