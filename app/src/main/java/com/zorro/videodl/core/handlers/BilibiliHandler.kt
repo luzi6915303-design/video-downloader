@@ -28,9 +28,22 @@ object BilibiliHandler : SiteHandler {
         // Share text looks like "【标题】 https://b23.tv/xxxx", so pull the bare
         // URL out before touching the network.
         val bare = Regex("""https?://\S+""").find(url)?.value?.trimEnd('，', '。', '、', ',', '.') ?: url
-        // The query string can be load-bearing — `?p=3` selects which part of a
-        // multi-part video to fetch — so expand the short link but keep it whole.
-        return if (bare.contains("b23.tv")) UrlResolver.follow(bare) else bare
+        val expanded = if (bare.contains("b23.tv")) UrlResolver.follow(bare) else bare
+        return stripShareParams(expanded)
+    }
+
+    /**
+     * Keeps only `p` from the query. Links shared from the app abroad carry
+     * `lang=zh-Hans`, and with it Bilibili serves a page without the video
+     * data, so yt-dlp falls back to its generic extractor and fails with
+     * "extracted extension ('html') is unusual". The rest is tracking noise.
+     * `p` must survive: it selects which part of a multi-part video to fetch.
+     */
+    private fun stripShareParams(url: String): String {
+        val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return url
+        val part = uri.rawQuery?.split('&')?.firstOrNull { it.startsWith("p=") }
+        val base = url.substringBefore('?').substringBefore('#')
+        return if (part != null) "$base?$part" else base
     }
 
     override fun formatSelector(quality: Quality): String = when (quality) {

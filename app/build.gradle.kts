@@ -23,8 +23,8 @@ android {
         applicationId = "com.zorro.videodl"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.1.7"
+        versionCode = 11
+        versionName = "1.1.9"
 
         // Honor 400 Pro is arm64 only. Dropping other ABIs keeps the bundled
         // Python/yt-dlp payload from tripling the APK size.
